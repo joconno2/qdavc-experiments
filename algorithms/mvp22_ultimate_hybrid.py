@@ -1,15 +1,18 @@
 """
-MVP 22: Ultimate Hybrid
+MVP 22: Ultimate Hybrid (v2 - fixed placement)
 
-Combines the three winning mechanisms from wave 1:
-1. Adaptive mutation rate with NO reset (wave 1 champion, +94.6%)
-2. Eviction pool without stagnation restart (stagnation restart hurts)
-3. Epsilon-greedy bandit over mutation experts (simpler beats UCB1)
+Combines adaptive mutation rate (1/5th rule, no reset) with Shuffling-style
+population management. On constraint change, ALL individuals (feasible +
+infeasible) are reshuffled against new constraints. Between changes, standard
+MAP-Elites placement with full constraint checking.
 
-Each mechanism addresses a different aspect:
-- Adaptive rate: self-tunes exploration intensity via 1/5th rule
-- Eviction pool: preserves solutions across constraint changes (Adaptive persona)
-- Epsilon bandit: selects among directed/standard/exploratory/conservative mutations
+This fixes the cold-start problem on TTP instances where 0% of random
+individuals satisfy constant constraints. By maintaining both feasible and
+infeasible populations and selecting from both, evolution can reach the
+feasible region through incremental constraint satisfaction.
+
+Base: Shuffling (framework baseline)
+Added: 1/5th adaptive mutation rate (no reset on constraint change)
 """
 
 import sys, os, math, random, copy
@@ -30,234 +33,166 @@ def roulette_selection(population):
     return population[npr.choice(len(population), p=probs)]
 
 
+def decide(rate):
+    return random.random() < rate
+
+
 class UltimateHybridElites(VariableConstraintGA):
 
     def __init__(self, problem_space, number_generations, population_size,
                  max_memory, cross_over_rate, mutation_rate, user,
                  update_interval, infeasible_rate=0.5, elitism=0.3,
-                 # Adaptive rate params
                  target_success=0.2, adapt_factor=1.2,
                  rate_min=0.05, rate_max=0.9,
-                 # Eviction params
-                 use_eviction=True,
-                 # Bandit params
-                 n_direction_history=5,
-                 epsilon_start=0.5, epsilon_floor=0.05, epsilon_decay=0.95,
-                 use_bandit=True):
+                 use_adaptive_rate=True):
         self.infeasible_rate = infeasible_rate
         self.elitism = elitism
         self.target_success = target_success
         self.adapt_factor = adapt_factor
         self.rate_min = rate_min
         self.rate_max = rate_max
-        self.use_eviction = use_eviction
-        self.n_direction_history = n_direction_history
-        self.epsilon_start = epsilon_start
-        self.epsilon_floor = epsilon_floor
-        self.epsilon_decay = epsilon_decay
-        self.use_bandit = use_bandit
+        self.use_adaptive_rate = use_adaptive_rate
         super().__init__(problem_space, number_generations, population_size,
                          max_memory, cross_over_rate, mutation_rate, user,
                          update_interval)
 
+    def _sort_pop(self, pop):
+        pop.sort(key=lambda i: i[0], reverse=True)
+
     def set_up(self):
-        n_bins = self.problem_space.get_num_bins()
-        self.infeasible_pop_size = int(self.max_memory * self.infeasible_rate)
-        self.elitism_num = int(self.infeasible_pop_size * self.elitism)
-        feasible_memory = self.max_memory - self.infeasible_pop_size
-        self.inds_per_bin = max(1, feasible_memory // n_bins)
-        self.bins = [[] for _ in range(n_bins)]
+        self.infeasible_pop_size = self.max_memory * self.infeasible_rate
+        self.elitism_num = round(self.infeasible_pop_size * self.elitism)
+        self.feasible_pop_size = self.max_memory - self.infeasible_pop_size
+        self.inds_per_bin = math.floor(self.feasible_pop_size /
+                                        self.problem_space.get_num_bins())
+        self.bins = [[] for _ in range(self.problem_space.get_num_bins())]
+        self.num_feasible = 0
         self.infeasible_pop = []
         self.current_rate = self.mutation_rate
 
-        # Eviction pool (no stagnation restart)
-        self.eviction_pool = []
-        self.eviction_max = max(n_bins, self.max_memory // 4)
-
-        # Epsilon-greedy bandit
-        self.successful_parents = []
-        self.n_experts = 4
-        self.expert_successes = [0] * self.n_experts
-        self.expert_attempts = [1] * self.n_experts
-        self.epsilon = self.epsilon_start
-
         for _ in range(self.population_size):
             ind = self.problem_space.generate_random_individual()
-            self._place(ind, self.infeasible_pop)
-
-    def _const_ok(self, ind):
-        return all(c.apply(ind) for c in self.problem_space.get_constant_constraints())
-
-    def _var_ok(self, ind):
-        return all(c.apply(ind) for c in self.variable_constraints)
+            self.place_in_bin(ind, self.infeasible_pop)
 
     def _all_ok(self, ind):
-        return self._const_ok(ind) and self._var_ok(ind)
+        """Check both constant and variable constraints."""
+        for con in self.problem_space.get_constant_constraints():
+            if not con.apply(ind):
+                return False
+        for con in self.variable_constraints:
+            if not con.apply(ind):
+                return False
+        return True
 
-    def _place(self, ind, infeasible_pop):
-        if self._const_ok(ind):
+    def place_in_bin(self, ind, infeasible_pop):
+        """Place individual. Matches Shuffling's approach: check ALL constraints
+        for bin placement, keep infeasible individuals in infeasible_pop."""
+        fes = True
+        constraints_sat = 0
+        for con in self.problem_space.get_constant_constraints() + self.variable_constraints:
+            if not con.apply(ind):
+                fes = False
+            else:
+                constraints_sat += 1
+
+        if fes:
             b = self.problem_space.place_in_bin(ind)
             fit = self.problem_space.fitness(ind)
             if len(self.bins[b]) < self.inds_per_bin:
                 self.bins[b].append((fit, ind))
-                self.bins[b].sort(key=lambda x: x[0], reverse=True)
+                self._sort_pop(self.bins[b])
+                self.num_feasible += 1
                 return True
             elif fit >= self.bins[b][-1][0]:
                 self.bins[b].pop(-1)
                 self.bins[b].append((fit, ind))
-                self.bins[b].sort(key=lambda x: x[0], reverse=True)
+                self._sort_pop(self.bins[b])
+                self.num_feasible += 1
                 return True
         else:
-            n_sat = sum(1 for c in self.problem_space.get_constant_constraints()
-                        if c.apply(ind))
             if len(infeasible_pop) < self.infeasible_pop_size:
-                infeasible_pop.append((n_sat, ind))
+                infeasible_pop.append((constraints_sat, ind))
         return False
 
-    def _select_parent(self):
-        total_f = sum(len(b) for b in self.bins)
+    def select(self):
+        """Select parent from feasible bins or infeasible population."""
+        total_f = self.num_feasible
         total_i = len(self.infeasible_pop)
         if total_f == 0 and total_i == 0:
             return self.problem_space.generate_random_individual()
+
         if total_f > 0 and (total_i == 0 or
-                random.random() < (total_f * 2) / (total_f + total_i)):
-            occupied = [i for i in range(len(self.bins)) if self.bins[i]]
-            if not occupied:
-                return self.problem_space.generate_random_individual()
-            return roulette_selection(self.bins[random.choice(occupied)])[1]
-        return roulette_selection(self.infeasible_pop)[1]
+                decide((total_f * 2) / (total_f + total_i))):
+            bi = random.choice(range(len(self.bins)))
+            while len(self.bins[bi]) == 0:
+                bi = random.choice(range(len(self.bins)))
+            return roulette_selection(self.bins[bi])[1]
+        else:
+            return roulette_selection(self.infeasible_pop)[1]
 
-    # -- Eviction --
+    def re_shuffle(self):
+        """On constraint change: collect all individuals, reinitialize,
+        re-place everyone under new constraints. Matches Shuffling."""
+        all_children = self.infeasible_pop[:]
+        all_children += [el for li in self.bins for el in li]
 
-    def _evict_and_reinsert(self):
-        for i in range(len(self.bins)):
-            surviving = []
-            for fit, ind in self.bins[i]:
-                if self._var_ok(ind):
-                    surviving.append((fit, ind))
-                elif len(self.eviction_pool) < self.eviction_max:
-                    self.eviction_pool.append((fit, ind, i))
-            self.bins[i] = surviving
+        new_infeasible = []
+        self.bins = [[] for _ in range(self.problem_space.get_num_bins())]
+        self.num_feasible = 0
+        self.infeasible_pop = []
 
-        still_evicted = []
-        for fit, ind, old_bin in self.eviction_pool:
-            if self._var_ok(ind) and self._const_ok(ind):
-                b = self.problem_space.place_in_bin(ind)
-                nf = self.problem_space.fitness(ind)
-                if len(self.bins[b]) < self.inds_per_bin:
-                    self.bins[b].append((nf, ind))
-                    self.bins[b].sort(key=lambda x: x[0], reverse=True)
-                elif nf >= self.bins[b][-1][0]:
-                    self.bins[b].pop(-1)
-                    self.bins[b].append((nf, ind))
-                    self.bins[b].sort(key=lambda x: x[0], reverse=True)
-                else:
-                    still_evicted.append((fit, ind, old_bin))
-            else:
-                still_evicted.append((fit, ind, old_bin))
-        self.eviction_pool = still_evicted
+        # Re-generate initial random population (like Shuffling's set_up)
+        for _ in range(self.population_size):
+            ind = self.problem_space.generate_random_individual()
+            self.place_in_bin(ind, new_infeasible)
 
-    # -- Epsilon-greedy experts --
+        # Re-place all existing individuals
+        for c in all_children:
+            self.place_in_bin(c[1], new_infeasible)
 
-    def _mutate_directed(self, parent):
-        if self.successful_parents:
-            donor = random.choice(self.successful_parents)
-            child, _ = self.problem_space.cross_over(parent, donor)
-            return self.problem_space.mutate(child, self.current_rate * 0.3)
-        return self.problem_space.mutate(parent, self.current_rate)
-
-    def _mutate_standard(self, parent):
-        return self.problem_space.mutate(parent, self.current_rate)
-
-    def _mutate_exploratory(self, parent):
-        child = parent
-        for _ in range(3):
-            child = self.problem_space.mutate(child, min(self.current_rate * 3.0, 1.0))
-        return child
-
-    def _mutate_conservative(self, parent):
-        return self.problem_space.mutate(parent, self.current_rate * 0.15)
-
-    def _apply_expert(self, eidx, parent):
-        if eidx == 0: return self._mutate_directed(parent)
-        elif eidx == 1: return self._mutate_standard(parent)
-        elif eidx == 2: return self._mutate_exploratory(parent)
-        else: return self._mutate_conservative(parent)
-
-    def _select_expert(self):
-        if not self.use_bandit:
-            return 1
-        if random.random() < self.epsilon:
-            return random.randint(0, self.n_experts - 1)
-        rates = [self.expert_successes[i] / self.expert_attempts[i]
-                 for i in range(self.n_experts)]
-        return rates.index(max(rates))
-
-    def _update_expert(self, eidx, success):
-        self.expert_attempts[eidx] += 1
-        if success:
-            self.expert_successes[eidx] += 1
-
-    def _reset_bandit(self):
-        self.expert_successes = [0] * self.n_experts
-        self.expert_attempts = [1] * self.n_experts
-        self.epsilon = self.epsilon_start
-
-    # -- Main --
+        self.infeasible_pop = new_infeasible
 
     def run_one_generation(self, cons_changed):
         if cons_changed:
-            self._reset_bandit()
-            self.successful_parents = []
-            if self.use_eviction:
-                self._evict_and_reinsert()
-            # NO rate reset. NO stagnation restart.
+            self.re_shuffle()
 
-        # Decay epsilon
-        self.epsilon = max(self.epsilon_floor, self.epsilon * self.epsilon_decay)
-
-        self.infeasible_pop.sort(key=lambda x: x[0], reverse=True)
-        new_inf = self.infeasible_pop[:self.elitism_num]
+        self._sort_pop(self.infeasible_pop)
+        new_infeasible = self.infeasible_pop[:self.elitism_num]
 
         successes = 0
         total = 0
 
         for _ in range(self.population_size // 2):
-            p1 = self._select_parent()
-            p2 = self._select_parent()
-            e1 = self._select_expert()
-            e2 = self._select_expert()
-            c1 = self._apply_expert(e1, p1)
-            c2 = self._apply_expert(e2, p2)
-            if random.random() < self.cross_over_rate:
-                c1, c2 = self.problem_space.cross_over(c1, c2)
-            s1 = self._place(c1, new_inf)
-            s2 = self._place(c2, new_inf)
-            self._update_expert(e1, s1)
-            self._update_expert(e2, s2)
+            child1 = self.select()
+            child2 = self.select()
+
+            if decide(self.cross_over_rate):
+                child1, child2 = self.problem_space.cross_over(child1, child2)
+
+            rate = self.current_rate if self.use_adaptive_rate else self.mutation_rate
+            child1 = self.problem_space.mutate(child1, rate)
+            child2 = self.problem_space.mutate(child2, rate)
+
+            s1 = self.place_in_bin(child1, new_infeasible)
+            s2 = self.place_in_bin(child2, new_infeasible)
             successes += int(s1) + int(s2)
             total += 2
-            if s1:
-                self.successful_parents.append(copy.deepcopy(c1))
-                if len(self.successful_parents) > self.n_direction_history:
-                    self.successful_parents.pop(0)
-            if s2:
-                self.successful_parents.append(copy.deepcopy(c2))
-                if len(self.successful_parents) > self.n_direction_history:
-                    self.successful_parents.pop(0)
 
-        # Adapt mutation rate (1/5th rule, NO reset)
-        if total > 0:
-            success_rate = successes / total
-            if success_rate > self.target_success:
+        # Adapt mutation rate (1/5th rule, NO reset on constraint change)
+        if self.use_adaptive_rate and total > 0:
+            sr = successes / total
+            if sr > self.target_success:
                 self.current_rate = min(self.rate_max,
                                         self.current_rate * self.adapt_factor)
             else:
                 self.current_rate = max(self.rate_min,
                                         self.current_rate / self.adapt_factor)
 
-        self.infeasible_pop = new_inf
-        return [[(f, i) for f, i in bl if self._all_ok(i)] for bl in self.bins]
+        self.infeasible_pop = new_infeasible
+
+        # Return only fully feasible individuals (bins already contain only
+        # feasible individuals since place_in_bin checks all constraints)
+        return self.bins
 
 
 ALGORITHM_CLASS = UltimateHybridElites

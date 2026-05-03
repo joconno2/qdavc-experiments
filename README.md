@@ -2,183 +2,228 @@
 
 Algorithms for the [QDA-VC Competition](https://qdavc.github.io/) at AIIDE 2026.
 
-**Task:** Quality-Diversity under Variable Constraints. Maintain archive quality as constraints shift between personas (Exploratory, Cycle, Adaptive) on two domains (TTP, LogicPuzzles).
+**Task:** Quality-Diversity under Variable Constraints. Maintain archive quality as constraints shift between personas (Exploratory, Cycle, Adaptive, Strict) on two domains (TTP, LogicPuzzles).
 
 **Competition timeline:** Submissions Aug 1 - Sep 8, 2026. Results Nov 13.
 
-**Competition entry:** `UH-nobandit` (Adaptive Rate + Eviction Pool). See below.
+**Competition entry:** `UH-nobandit` (Shuffling base + adaptive mutation rate). See below.
 
 ---
 
-## Results (30 seeds, Mann-Whitney U, 2 waves, 54 conditions, 9,720 tasks)
+## Competition Entry: UH-nobandit (v2)
 
-### Competition Entry: UH-nobandit
+**Implementation:** `algorithms/mvp22_ultimate_hybrid.py`
 
-Two non-interfering mechanisms:
-1. **Adaptive mutation rate** via 1/5th success rule (Rechenberg, 1973). NO reset on constraint change. The rule self-corrects: when bins empty after a constraint shift, success rate rises, rate increases automatically.
-2. **Eviction pool** stores solutions displaced by constraint changes; re-inserts them when they become feasible again. NO stagnation restart (it hurts).
+Shuffling-based population management + Rechenberg's 1/5th success rule for adaptive mutation rate.
 
-Implementation: `algorithms/mvp22_ultimate_hybrid.py` with `use_bandit=False`.
+**How it works:**
 
-### TTP Domain (Mean QD Score, 30 seeds)
+1. **Shuffling base.** On constraint change, all individuals (feasible + infeasible) are collected, a fresh random population is injected, and everything is re-placed against the new constraints. This is the framework's Shuffling baseline, which turned out to be the strongest baseline by a wide margin.
 
-| Algorithm | Exploratory | Cycle | Adaptive | Total |
-|-----------|----------:|------:|--------:|------:|
-| **UH-nobandit** | 7,953 | **38,310** | **20,601** | **66,863** |
-| AdaptRate-noreset | **12,828** | 38,243 | 6,854 | 57,924 |
-| BdEvict-nostag | 11,595 | 24,380 | 20,830 | 56,805 |
-| Epsilon-Bandit | 7,820 | 34,645 | 1,911 | 44,376 |
-| Thompson-Bandit | 9,783 | 31,898 | 1,974 | 43,654 |
-| EvRst-nostag | 10,442 | 23,380 | 9,669 | 43,491 |
-| Bandit+Evict | 7,140 | 23,525 | 9,360 | 40,025 |
-| EGGROLL | 11,330 | 23,294 | 2,754 | 37,378 |
-| DE-Elites | 9,223 | 25,688 | 1,583 | 36,494 |
-| Bandit (UCB1) | 4,587 | 26,487 | 1,727 | 32,801 |
-| Evict-Restart | 6,420 | 15,263 | 10,823 | 32,506 |
-| Baseline | 7,389 | 14,907 | 7,439 | 29,735 |
-| Novelty-Selection | 2,165 | 6,309 | 227 | 8,700 |
-| Island | 815 | 3,952 | 25 | 4,793 |
+2. **Adaptive mutation rate** via the 1/5th success rule (Rechenberg, 1973). If more than 20% of offspring enter the archive, increase the mutation rate (too conservative). If fewer than 20%, decrease it (too aggressive). The rate is **never reset** on constraint change. The rule self-corrects naturally: when constraints shift and bins empty, the success rate rises (easy to improve empty bins), which pushes the rate up automatically. This implicit adaptation is the core contribution.
 
-### Statistical Significance: UH-nobandit vs Baseline
+**What it does NOT include:**
+- No eviction pool (Shuffling's reshuffle handles displaced solutions)
+- No stagnation restart (hurts when combined with reshuffling)
+- No bandit operator selection (counterproductive with adaptive rate)
+- No explicit constraint change detection (1/5th rule provides implicit detection)
 
-| Domain | Persona | UH-nobandit | Baseline | Diff | p-value | Cohen's d |
-|--------|---------|----------:|--------:|-----:|--------:|----------:|
-| TTP | Exploratory | 7,953 | 8,222 | -270 | 0.855 | -0.02 |
-| TTP | **Cycle** | **38,310** | 17,013 | **+21,297** | **0.001** | **+1.07** |
-| TTP | **Adaptive** | **20,601** | 7,261 | **+13,340** | **0.010** | **+0.84** |
-| LogicPuzzles | Exploratory | 13 | 10 | +3 | 0.682 | +0.15 |
-| LogicPuzzles | **Cycle** | **47** | 35 | **+13** | **<0.001** | **+2.09** |
-| LogicPuzzles | Adaptive | 22 | 24 | -2 | 0.830 | -0.16 |
+---
 
-Significant improvement on Cycle (both domains, p<=0.001, d>1.0) and TTP Adaptive (p=0.010, d=0.84). Neutral on Exploratory.
+## Experimental History
 
-### UH-nobandit vs Previous Best Algorithms (TTP)
+This project involved four major experimental phases, each building on findings from the previous. Total: **17,320+ experiments** across 54+ algorithm conditions, 2 domains, 4 personas, and 30-100 seeds per condition.
 
-| Comparison | Persona | UH-nobandit | Rival | p-value | Sig |
-|------------|---------|----------:|------:|--------:|-----|
-| vs Evict-Restart | Cycle | 38,310 | 15,263 | <0.001 | *** |
-| vs Evict-Restart | Adaptive | 20,601 | 10,823 | 0.040 | * |
-| vs EGGROLL | Cycle | 38,310 | 23,294 | 0.032 | * |
-| vs EGGROLL | Adaptive | 20,601 | 2,754 | <0.001 | *** |
-| vs Bandit (UCB1) | Adaptive | 20,601 | 1,727 | <0.001 | *** |
-| vs BdEvict-nostag | Cycle | 38,310 | 24,380 | 0.016 | * |
+### Phase 1: Wave 1 (31 algorithms, 5,580 tasks)
 
-### Grand Totals (TTP + LogicPuzzles, all personas)
+Tested 10 new algorithm variants against the VC-MAP-Elites baseline. Parameters: 100 gens, pop 50, memory 200, 3 personas (Exploratory, Cycle, Adaptive), 30 seeds.
 
-| Rank | Algorithm | Total QD | vs Baseline |
-|------|-----------|-------:|:-----------:|
-| 1 | **UH-nobandit** | **66,945** | **+106%** |
-| 2 | AdaptRate-noreset | 57,984 | +95% |
-| 3 | BdEvict-nostag | 56,888 | +91% |
-| 4 | AR-f1.1 (wave 2) | 52,864 | +62% |
-| 5 | AR-t0.5 (wave 2) | 52,545 | +61% |
-| 6 | Epsilon-Bandit | 44,440 | +49% |
-| 7 | Thompson-Bandit | 43,718 | +47% |
-| 8 | EvRst-nostag | 43,569 | +46% |
-| 9 | Bandit+Evict | 40,119 | +35% |
-| 10 | EGGROLL | 37,440 | +26% |
-| 11 | DE-Elites | 36,560 | +23% |
-| 12 | Bandit (UCB1) | 32,869 | +10% |
-| 13 | Evict-Restart | 32,596 | +9% |
-| 14 | Baseline (VC-MAP-Elites) | 29,803 | -- |
-| -- | Novelty-Selection | 8,755 | -71% |
-| -- | Island | 4,860 | -84% |
+**New algorithms tested:**
+
+| # | Algorithm | Mechanism | Result |
+|---|-----------|-----------|--------|
+| 9 | Bandit+Evict | UCB1 bandit + eviction/restart as background | +35% |
+| 10 | Constraint-Memory | Hash constraint configs, recall on repeat | -13% |
+| 11 | DE-Elites | Differential evolution crossover chain | +23% |
+| 12 | Novelty-Selection | Parent selection biased toward empty bins | **-71%** |
+| 13 | Adaptive-Rate | 1/5th success rule, self-tuning mutation | +3% |
+| 14 | Sliding-Window | Top-K per bin, revalidate on change | **-49%** |
+| 15 | Thompson-Bandit | Beta-posterior expert selection | +47% |
+| 16 | Crossover-Primary | Always crossover, small post-mutation | +12% |
+| 17 | Age-Weighted | Old individuals easier to replace | +7% |
+| 18 | Epsilon-Bandit | Decaying epsilon-greedy experts | +49% |
+
+Plus 9 ablation variants (EGGROLL-nodir, EvRst-noevict, EvRst-nostag, BdEvict-noevict/nostag/nobandit, Memory-nomemory, Novelty-none, AdaptRate-noreset, SlidingK1/K5, Age-nopen).
+
+**Key finding:** `AdaptRate-noreset` (+95%) was the runaway winner. NOT resetting the mutation rate on constraint change was the single biggest improvement. The 1/5th rule self-corrects naturally because empty bins = high success rate = rate increases automatically.
+
+**Other findings:**
+- Stagnation restart actively hurts when eviction is present
+- Simpler bandits (epsilon +49%, Thompson +47%) beat UCB1 (+10%)
+- Bandit operator selection is counterproductive with adaptive rate
+- Constraint memory, novelty selection, and sliding window all hurt
+
+### Phase 2: Wave 2 (23 algorithms, 4,140 tasks)
+
+Built on wave 1 findings. Tested hybrids and parameter sweeps.
+
+**Key result:** `UH-nobandit` (+106%) combined adaptive rate + eviction pool + NO bandit. The bandit was counterproductive (UH-nobandit 66,945 >> Ultimate-Hybrid with bandit 47,413). The adaptive rate already handles exploration/exploitation, making operator selection redundant.
+
+**Parameter sweeps:**
+- UCB c sweep: c=2.0 best for BdEvict-nostag
+- Adapt factor sweep: f=1.1 slightly better than f=1.2
+- Target success sweep: t=0.5 marginally better than t=0.2
+- Direction history: n=3 slightly better than n=5 for Bandit
+
+### Phase 3: Validation (100-seed confirmation + official params)
+
+**100-seed confirmation (3,000 tasks):** UH-nobandit and BdEvict-nostag tied at +70%. Both significant on Adaptive (p<0.001) and Cycle (p<0.001). Algorithms without eviction pool significantly worse than baseline on Adaptive.
+
+**Official params validation (900 tasks):** With official parameters (300 gens, pop 200, memory 500, interval 50), UH-nobandit scored 128K total QD (+85% vs baseline), clear #1 with 22K gap to #2.
+
+### Phase 4: Comprehensive Evaluation (3,600 tasks)
+
+Tested all algorithms against ALL framework baselines (VC-MAP-Elites, Filtering, RandomRestarts, Shuffling) on ALL personas (including Strict, never previously tested). Official parameters.
+
+**Critical discovery:** Shuffling was the strongest baseline (145K total QD), and all our algorithms scored **zero on Strict persona** due to a placement bug. Our `_place` method gated on constant constraint satisfaction, but on TTP instances with 150 items, 0% of random individuals pass constant constraints. The framework baselines handle this by maintaining infeasible populations that evolve toward feasibility; our algorithms did not.
+
+**The fix (v2):** Rewrote UH-nobandit to use Shuffling's population management as the base. All individuals (feasible + infeasible) participate in evolution. Fresh random individuals are injected on constraint change. Only the adaptive mutation rate is added on top. This matches the framework's approach while adding the 1/5th rule.
+
+**Comprehensive v2 rerun in progress** (3,600 tasks, official params, all 4 personas).
 
 ---
 
 ## Key Findings
 
-1. **Adaptive mutation rate without reset is the single biggest improvement.** The 1/5th success rule self-corrects after constraint changes: empty bins mean high success rate, which pushes the rate up automatically. Forcing a reset disrupts this natural adaptation. (AdaptRate-noreset +95% vs Adaptive-Rate +3%)
+### What works
 
-2. **Eviction pool is critical for Adaptive persona.** Storing displaced solutions and re-inserting when feasible handles the forward-backward constraint pattern. Without eviction, Adaptive scores drop by 6,600+ (p<0.001).
+1. **Adaptive mutation rate (1/5th rule) without reset.** The single biggest improvement across all experiments. The rule provides implicit constraint change detection: when constraints shift and many bins empty, the success rate rises, automatically increasing the mutation rate. No explicit detection mechanism needed. (+95% on 3 personas at small params, dominant on Cycle at all scales)
 
-3. **Stagnation restart hurts.** When eviction is present, stagnation restart wipes progress. BdEvict-nostag >> Bandit+Evict across all conditions.
+2. **Shuffling-based population management.** Keeping all individuals across constraint changes and re-classifying against new constraints is stronger than eviction pools, random restarts, or filtering. Shuffling was the strongest framework baseline and the only algorithm to score on Strict persona.
 
-4. **Bandit mutation selection hurts when combined with adaptive rate.** The rate already handles exploration/exploitation; adding a bandit over-diversifies. UH-nobandit (66,945) >> Ultimate-Hybrid with bandit (47,413).
+3. **Simplicity over complexity.** Two orthogonal mechanisms (Shuffling + adaptive rate) outperform complex hybrids. Adding bandit selection, constraint memory, novelty bias, or sliding windows to the base all hurt performance.
 
-5. **Simpler bandits beat UCB1.** Epsilon-greedy (+49%) and Thompson Sampling (+47%) both outperform UCB1 (+10%). UCB1 over-explores in the non-stationary constraint environment.
+### What doesn't work
 
-6. **Combined mechanisms interfere unless carefully decoupled.** EGGROLL + Evict-Restart failed (-5.5%). Bandit + Evict + Adaptive-Rate also underperformed. The winning approach: two orthogonal mechanisms (rate adaptation + archive management) that don't share state.
+| Mechanism | Result | Why |
+|-----------|--------|-----|
+| **Bandit operator selection** | Counterproductive with adaptive rate | Rate already handles exploration; bandit over-diversifies |
+| **Constraint Memory** | -13% | Exact hash matching rarely finds repeated constraint configs |
+| **Novelty Selection** | -71% | Biasing toward empty bins pulls resources from productive search |
+| **Sliding Window** | -49% | Extra storage per bin dilutes archive without benefit |
+| **Island Model** | -84% | Splits archive, prevents coordinated response to changes |
+| **Stagnation Restart** | Hurts with eviction/shuffling | Wipes progress that reshuffling manages |
+| **Lamarckian** | 0% improvement | Local search adds cost without improving QD |
+| **Coevolution** | -30% | Constraint predictors don't generalize |
 
-7. **DE-style mutation works.** Differential evolution crossover chain (+23%) provides a different exploration geometry that complements standard mutation.
+### Critical lesson: test against ALL baselines
 
-### What Failed
-
-- **Constraint Memory** (-13%): Exact hash matching rarely finds repeated constraint configs.
-- **Novelty Selection** (-71%): Biasing toward empty bins pulls resources from productive search.
-- **Sliding Window** (-49%): Extra storage per bin dilutes the archive.
-- **Island Model** (-84%): Splits the archive, prevents coordinated response to constraint changes.
-- **Lamarckian** (-14%): Local search adds cost without improving QD.
-- **Coevolution** (-30%): Constraint predictors don't generalize.
+Our initial waves compared only against VC-MAP-Elites. Shuffling (a simpler framework baseline) was 45% stronger and exposed a fundamental flaw in our placement logic. The placement bug (gating on constant constraints) caused zero scores on 3 of 6 TTP problem instances and the entire Strict persona. This would not have been caught without testing against all baselines.
 
 ---
 
 ## Algorithms
 
-### Wave 1 (original + 10 new)
+### Framework Baselines
 
-| # | File | Method | Total QD |
-|---|------|--------|-------:|
-| 1 | `mvp1_lamarckian.py` | Local search before archive insertion | 25,751 |
-| 2 | `mvp2_coevolution.py` | Coevolved constraint predictors | 20,781 |
-| 3 | `mvp3_scope_compressed.py` | Multi-step small mutations (SCOPE-inspired) | 25,460 |
-| 4 | `mvp4_eggroll_lowrank.py` | Directed mutation from successful parents | 37,440 |
-| 5 | `mvp5_island_model.py` | Multiple sub-archives with migration | 4,860 |
-| 6 | `mvp6_evict_restart.py` | Eviction pool + stagnation restart | 32,596 |
-| 7 | `mvp7_bandit_experts.py` | UCB1 bandit over 4 mutation experts | 32,869 |
-| 8 | `ablation_winners.py` | EGGROLL + Evict-Restart combined | 28,168 |
-| 9 | `mvp9_bandit_evict.py` | Bandit experts + eviction background | 40,119 |
-| 10 | `mvp10_constraint_memory.py` | Hash constraint configs, recall solutions | 26,054 |
-| 11 | `mvp11_de_elites.py` | DE/rand/1 crossover chain mutation | 36,560 |
-| 12 | `mvp12_novelty_selection.py` | Parent selection biased toward empty bins | 8,755 |
-| 13 | `mvp13_adaptive_rate.py` | 1/5th success rule, self-tuning mutation | 30,778 |
-| 14 | `mvp14_sliding_window.py` | Top-K per bin, revalidate on change | 15,288 |
-| 15 | `mvp15_thompson_bandit.py` | Thompson Sampling expert selection | 43,718 |
-| 16 | `mvp16_crossover_primary.py` | Always crossover, small post-mutation | 33,410 |
-| 17 | `mvp17_age_weighted.py` | Age-based replacement pressure | 31,939 |
-| 18 | `mvp18_epsilon_bandit.py` | Decaying epsilon-greedy expert selection | 44,440 |
+| Algorithm | File | Description |
+|-----------|------|-------------|
+| VC-MAP-Elites | `framework/Algorithms/VCMapElites.py` | 2D grid (diversity x constraint satisfaction) |
+| Shuffling | `framework/Algorithms/Shuffling.py` | Re-sort all individuals on constraint change |
+| RandomRestarts | `framework/Algorithms/RandomRestarts.py` | Dump population on constraint change |
+| Filtering | `framework/Algorithms/Filtering.py` | Ignore variable constraints, filter at output |
 
-### Wave 2 (hybrids + parameter sweeps)
+### Our Algorithms (MVP 1-22)
 
-| # | File | Method | Total QD |
-|---|------|--------|-------:|
-| 22 | `mvp22_ultimate_hybrid.py` | Adaptive rate + eviction + epsilon bandit | 47,413 |
-| 22 | `mvp22_ultimate_hybrid.py` (use_bandit=False) | **Adaptive rate + eviction only** | **66,945** |
-| 21 | `mvp21_bandit_5expert.py` | 5 experts (adds SCOPE multi-step) | 44,525 |
-
-Plus UCB c sweeps, adapt factor sweeps, target success sweeps, direction history sweeps. See `run_wave2.py`.
+| # | File | Method |
+|---|------|--------|
+| 1 | `mvp1_lamarckian.py` | Local search before archive insertion |
+| 2 | `mvp2_coevolution.py` | Coevolved constraint predictors |
+| 3 | `mvp3_scope_compressed.py` | Multi-step small mutations (SCOPE-inspired) |
+| 4 | `mvp4_eggroll_lowrank.py` | Directed mutation from successful parents |
+| 5 | `mvp5_island_model.py` | Multiple sub-archives with migration |
+| 6 | `mvp6_evict_restart.py` | Eviction pool + stagnation restart |
+| 7 | `mvp7_bandit_experts.py` | UCB1 bandit over 4 mutation experts |
+| 8 | `ablation_winners.py` | EGGROLL + Evict-Restart combined |
+| 9 | `mvp9_bandit_evict.py` | Bandit experts + eviction background |
+| 10 | `mvp10_constraint_memory.py` | Hash constraint configs, recall solutions |
+| 11 | `mvp11_de_elites.py` | DE/rand/1 crossover chain mutation |
+| 12 | `mvp12_novelty_selection.py` | Parent selection biased toward empty bins |
+| 13 | `mvp13_adaptive_rate.py` | 1/5th success rule, self-tuning mutation |
+| 14 | `mvp14_sliding_window.py` | Top-K per bin, revalidate on change |
+| 15 | `mvp15_thompson_bandit.py` | Thompson Sampling expert selection |
+| 16 | `mvp16_crossover_primary.py` | Always crossover, small post-mutation |
+| 17 | `mvp17_age_weighted.py` | Age-based replacement pressure |
+| 18 | `mvp18_epsilon_bandit.py` | Decaying epsilon-greedy expert selection |
+| 19 | `mvp19_bandit_ucb_sweep.py` | UCB c parameter sweep wrapper |
+| 20 | `mvp20_bandit_evict_memory.py` | Bandit + eviction + constraint memory |
+| 21 | `mvp21_bandit_5expert.py` | 5 experts (adds SCOPE multi-step) |
+| **22** | **`mvp22_ultimate_hybrid.py`** | **Shuffling base + adaptive rate (competition entry)** |
 
 ---
 
 ## Running
 
 ```bash
-# Wave 1: 31 algorithms, 5,580 tasks (~90 min on 64 cores)
-python run_full_ablation.py
+# Comprehensive test: all algorithms, all baselines, all personas, official params
+# 15 algorithms x 2 domains x 4 personas x 30 seeds = 3,600 tasks (~3h on 64 cores)
+python run_comprehensive.py
 
-# Wave 2: 23 algorithms, 4,140 tasks (~70 min on 64 cores)
-python run_wave2.py
+# Analysis (tables, stats, mechanism matrix)
+python analyze_results.py results/comprehensive.json
 
-# Analysis (tables, stats, figures)
-python analyze_results.py results/full_ablation_v2.json
-python analyze_results.py results/wave2_results.json --csv results/tables.csv --figures results/figures/
+# Earlier waves (3-persona, smaller params)
+python run_full_ablation.py    # Wave 1: 31 conditions, 5,580 tasks
+python run_wave2.py            # Wave 2: 23 conditions, 4,140 tasks
+python run_100seed.py          # 100-seed confirmation on top 5
+python run_official_params.py  # Official params, 6 algorithms
+
+# Instrumented runs (per-generation traces for figures)
+python run_instrumented.py           # Small params, generates figures
+python run_instrumented_official.py  # Official params, generates figures
 ```
 
-Results: `results/full_ablation_v2.json`, `results/wave2_results.json`
+Results in `results/`. Figures in `results/figures/` and `results/figures_official/`.
 
 ---
 
-## Next Steps
+## Related Work
 
-### Competition Entry (Aug 1 - Sep 8)
+Full positioning notes at `~/Documents/Work/qdavc_related_work_notes.md`. Key references:
 
-1. **Verify on official evaluation harness.** Current results use our local framework fork. Need to confirm scores reproduce.
-2. **Fine-tune adaptive rate parameters.** Wave 2 suggests factor=1.1 and target=0.5 may be slightly better than defaults (1.2, 0.2). Run focused sweep.
-3. **LogicPuzzles domain.** All algorithms score 100-1000x lower than TTP. May need domain-specific operators.
+- **CMA-MAE** (Fontaine & Nikolaidis, GECCO 2023): Adapts archive acceptance thresholds via learning rate. Our approach adapts mutation intensity via success feedback. CMA-MAE uses a predetermined annealing schedule; the 1/5th rule is self-correcting.
+- **Multi-Emitter MAP-Elites** (Cully, GECCO 2021): UCB bandit across emitter types. Our ablations show bandits are counterproductive with adaptive rate.
+- **Dynamic QD** (Gallotta et al., GECCO 2024 poster): Handles changing fitness/behavior functions via archive re-evaluation. QDA-VC is a distinct problem (changing constraint feasibility). The 1/5th rule provides implicit change detection.
+- **Rechenberg's 1/5th rule** (1973): Original self-adaptive step size for ES. To our knowledge, this is the first application to MAP-Elites / QD.
+- **Adaptive Operator Selection** (Fialho et al., 2008-2010): DMAB/Compass select among discrete operators. Our approach adapts a continuous parameter with one configuration knob. AOS requires tuning its own meta-parameters.
 
-### Paper (AIIDE 2026)
+**Novelty claims:**
+1. First application of the 1/5th success rule to MAP-Elites / QD
+2. First study of QD under variable (dynamic) constraints
+3. Empirical demonstration that adaptive rate makes bandit operator selection redundant
+4. Finding that NOT resetting mutation rate on constraint change is optimal
+5. Shuffling as the strongest baseline for variable-constraint QD (previously unreported)
 
-- Full statistical tables ready
-- Narrative: self-adapting mutation rate as a lightweight mechanism for non-stationary QD. The 1/5th rule naturally handles constraint changes without explicit detection.
-- Position against: Multi-Emitter MAP-Elites (Cully), Adaptive Operator Selection (Thierens), CMA-MAE
-- Key claim: simpler mechanism combinations outperform complex adaptive strategies when mechanisms are orthogonal
+---
+
+## Known Issues
+
+- **MVPs 1-18 have a placement bug:** `_place` gates on constant constraint satisfaction, causing zero scores on TTP instances where random individuals can't reach the feasible region. Only MVP 22 (v2) is fixed. These MVPs' results are valid for relative comparison at small params (where the bug is less severe) but not at official params on all problem instances.
+- **LodeRunner domain is empty** in the framework. Only TTP and LogicPuzzles are available.
+- **Strict persona scoring varies significantly** by TTP problem instance due to constraint accumulation dynamics.
+- **LogicPuzzles scores are 100-1000x lower than TTP** across all algorithms. May need domain-specific operators.
+
+---
+
+## Project Timeline
+
+| Date | Event |
+|------|-------|
+| Apr 29 | QDA-VC competition discovered, initial MVPs 1-8 |
+| May 2 (AM) | Wave 1: 31 algorithms, 5,580 tasks. AdaptRate-noreset champion (+95%) |
+| May 2 (AM) | Wave 2: 23 algorithms, 4,140 tasks. UH-nobandit champion (+106%) |
+| May 2 (PM) | 100-seed confirmation (3,000 tasks). Official params validation (900 tasks) |
+| May 2 (PM) | Comprehensive eval: discovered Shuffling baseline is strongest, placement bug on Strict |
+| May 2 (night) | Fixed placement (v2): Shuffling base + adaptive rate. Comprehensive v2 rerun in progress |
+| Aug 1-Sep 8 | Competition submission window |
+| Nov 13 | Results at AIIDE 2026 |
