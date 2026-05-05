@@ -1,21 +1,15 @@
 #!/usr/bin/env python3
 """
-Comprehensive rerun: ALL algorithms against ALL baselines, ALL personas, official params.
+100-seed run at official params for top algorithms.
+Goal: statistical power for the paper.
 
-This is the definitive run. Everything we've built, tested properly.
-
-Algorithms (16):
-  Framework baselines: VC-MAP-Elites, Filtering, RandomRestarts, Shuffling
-  Wave 1 winners: EGGROLL, Evict-Restart, Bandit (UCB1), Epsilon-Bandit
-  Wave 2 winners: UH-nobandit, UH-noevict, AdaptRate-noreset, BdEvict-nostag
-  New hybrids: Shuffling+AdaptRate, Shuffling+Evict, Shuffling+Both, DE-Elites
-
+Algorithms: UH-nobandit, Shuf+Both, Shuf+AdaptRate, Shuffling (baseline)
 Official params: 300 gens, pop 200, memory 500, interval 50, xo 0.5, mut 0.1
 Domains: TTP, LogicPuzzles
 Personas: Exploratory, Cycle, Adaptive, Strict
-Seeds: 30
+Seeds: 100
 
-16 * 2 * 4 * 30 = 3,840 tasks
+4 algos * 2 domains * 4 personas * 100 seeds = 3,200 tasks
 """
 
 import sys
@@ -48,8 +42,6 @@ XO_RATE = 0.5
 MUT_RATE = 0.1
 INTERVAL = 50
 
-
-# === Shuffling hybrid algorithms (defined inline) ===
 
 def roulette_selection(population):
     small = min(c[0] for c in population)
@@ -96,15 +88,6 @@ class ShufflingAdaptRate(VariableConstraintGA):
         for _ in range(self.population_size):
             ind = self.problem_space.generate_random_individual()
             self._place(ind, self.infeasible_pop)
-
-    def _const_ok(self, ind):
-        return all(c.apply(ind) for c in self.problem_space.get_constant_constraints())
-
-    def _var_ok(self, ind):
-        return all(c.apply(ind) for c in self.variable_constraints)
-
-    def _all_ok(self, ind):
-        return self._const_ok(ind) and self._var_ok(ind)
 
     def _place(self, ind, infeasible_pop):
         fes = True
@@ -199,137 +182,8 @@ class ShufflingAdaptRate(VariableConstraintGA):
         return self.bins
 
 
-class ShufflingEvict(VariableConstraintGA):
-    """Shuffling + eviction pool (no stagnation restart, no adaptive rate)."""
-
-    def __init__(self, problem_space, number_generations, population_size,
-                 max_memory, cross_over_rate, mutation_rate, user,
-                 update_interval, infeasible_rate=0.5, elitism=0.3):
-        self.infeasible_rate = infeasible_rate
-        self.elitism = elitism
-        super().__init__(problem_space, number_generations, population_size,
-                         max_memory, cross_over_rate, mutation_rate, user,
-                         update_interval)
-
-    def set_up(self):
-        n_bins = self.problem_space.get_num_bins()
-        self.infeasible_pop_size = int(self.max_memory * self.infeasible_rate)
-        self.elitism_num = int(self.infeasible_pop_size * self.elitism)
-        feasible_memory = self.max_memory - self.infeasible_pop_size
-        self.inds_per_bin = max(1, feasible_memory // n_bins)
-        self.bins = [[] for _ in range(n_bins)]
-        self.infeasible_pop = []
-        self.eviction_pool = []
-        self.eviction_max = max(n_bins, self.max_memory // 4)
-
-        for _ in range(self.population_size):
-            ind = self.problem_space.generate_random_individual()
-            self._place(ind, self.infeasible_pop)
-
-    def _var_ok(self, ind):
-        return all(c.apply(ind) for c in self.variable_constraints)
-
-    def _all_ok(self, ind):
-        for con in self.problem_space.get_constant_constraints() + self.variable_constraints:
-            if not con.apply(ind):
-                return False
-        return True
-
-    def _place(self, ind, infeasible_pop):
-        fes = True
-        constraints_sat = 0
-        for con in self.problem_space.get_constant_constraints() + self.variable_constraints:
-            if not con.apply(ind):
-                fes = False
-            else:
-                constraints_sat += 1
-
-        if fes:
-            b = self.problem_space.place_in_bin(ind)
-            fit = self.problem_space.fitness(ind)
-            if len(self.bins[b]) < self.inds_per_bin:
-                self.bins[b].append((fit, ind))
-                self.bins[b].sort(key=lambda x: x[0], reverse=True)
-                return True
-            elif fit >= self.bins[b][-1][0]:
-                self.bins[b].pop(-1)
-                self.bins[b].append((fit, ind))
-                self.bins[b].sort(key=lambda x: x[0], reverse=True)
-                return True
-        else:
-            if len(infeasible_pop) < self.infeasible_pop_size:
-                infeasible_pop.append((constraints_sat, ind))
-        return False
-
-    def _select(self):
-        total_f = sum(len(b) for b in self.bins)
-        total_i = len(self.infeasible_pop)
-        if total_f == 0 and total_i == 0:
-            return self.problem_space.generate_random_individual()
-        if total_f > 0 and (total_i == 0 or
-                random.random() < (total_f * 2) / (total_f + total_i)):
-            occupied = [i for i in range(len(self.bins)) if self.bins[i]]
-            if not occupied:
-                return self.problem_space.generate_random_individual()
-            return roulette_selection(self.bins[random.choice(occupied)])[1]
-        return roulette_selection(self.infeasible_pop)[1]
-
-    def _shuffle_and_evict(self):
-        """Shuffle all solutions, plus eviction pool management."""
-        all_solutions = []
-        for b in self.bins:
-            for fit, ind in b:
-                if self._var_ok(ind):
-                    all_solutions.append(ind)
-                elif len(self.eviction_pool) < self.eviction_max:
-                    self.eviction_pool.append((fit, ind))
-        for n_sat, ind in self.infeasible_pop:
-            all_solutions.append(ind)
-
-        # Try reinserting evicted solutions
-        still_evicted = []
-        for fit, ind in self.eviction_pool:
-            if self._all_ok(ind):
-                all_solutions.append(ind)
-            else:
-                still_evicted.append((fit, ind))
-        self.eviction_pool = still_evicted
-
-        n_bins = self.problem_space.get_num_bins()
-        self.bins = [[] for _ in range(n_bins)]
-        self.infeasible_pop = []
-
-        for _ in range(self.population_size):
-            ind = self.problem_space.generate_random_individual()
-            self._place(ind, self.infeasible_pop)
-
-        for ind in all_solutions:
-            self._place(ind, self.infeasible_pop)
-
-    def run_one_generation(self, cons_changed):
-        if cons_changed:
-            self._shuffle_and_evict()
-
-        self.infeasible_pop.sort(key=lambda x: x[0], reverse=True)
-        new_inf = self.infeasible_pop[:self.elitism_num]
-
-        for _ in range(self.population_size // 2):
-            p1, p2 = self._select(), self._select()
-            if random.random() < self.cross_over_rate:
-                c1, c2 = self.problem_space.cross_over(p1, p2)
-            else:
-                c1, c2 = copy.deepcopy(p1), copy.deepcopy(p2)
-            c1 = self.problem_space.mutate(c1, self.mutation_rate)
-            c2 = self.problem_space.mutate(c2, self.mutation_rate)
-            self._place(c1, new_inf)
-            self._place(c2, new_inf)
-
-        self.infeasible_pop = new_inf
-        return self.bins
-
-
 class ShufflingBoth(VariableConstraintGA):
-    """Shuffling + eviction pool + adaptive rate. The full hybrid on shuffling base."""
+    """Shuffling + eviction pool + adaptive rate."""
 
     def __init__(self, problem_space, number_generations, population_size,
                  max_memory, cross_over_rate, mutation_rate, user,
@@ -496,40 +350,14 @@ def run_one(args):
     from Personas.TwoForwardOneBack import TwoForOneBackUser
     from Personas.Adaptive import AdaptiveUser
     from Personas.Strict import StrictUser
-    from Algorithms.VCMapElites import VariableConstraintMapElites
-    from Algorithms.Filtering import Filtering
-    from Algorithms.RandomRestarts import RandomRestarts
     from Algorithms.Shuffling import Shuffling
-
-    from mvp4_eggroll_lowrank import EGGROLLElites
-    from mvp6_evict_restart import EvictRestartElites
-    from mvp7_bandit_experts import BanditExpertElites
-    from mvp9_bandit_evict import BanditEvictElites
-    from mvp11_de_elites import DEElites
-    from mvp13_adaptive_rate import AdaptiveRateElites
-    from mvp18_epsilon_bandit import EpsilonBanditElites
     from mvp22_ultimate_hybrid import UltimateHybridElites
 
     algo_map = {
-        # Framework baselines
-        "VC-MAP-Elites": (VariableConstraintMapElites, {}),
-        "Filtering": (Filtering, {}),
-        "RandomRestarts": (RandomRestarts, {}),
-        "Shuffling": (Shuffling, {}),
-        # Wave 1 winners
-        "EGGROLL": (EGGROLLElites, {}),
-        "Evict-Restart": (EvictRestartElites, {}),
-        "Bandit-UCB1": (BanditExpertElites, {}),
-        "Epsilon-Bandit": (EpsilonBanditElites, {}),
-        # Wave 2 winners
         "UH-nobandit": (UltimateHybridElites, {}),
-        "AdaptRate-noreset": (AdaptiveRateElites, {"reset_on_change": False}),
-        "BdEvict-nostag": (BanditEvictElites, {"use_stagnation": False}),
-        "DE-Elites": (DEElites, {}),
-        # New shuffling hybrids
         "Shuf+AdaptRate": (ShufflingAdaptRate, {}),
-        "Shuf+Evict": (ShufflingEvict, {}),
         "Shuf+Both": (ShufflingBoth, {}),
+        "Shuffling": (Shuffling, {}),
     }
     domain_map = {
         "TTP": TTPProblemSpace,
@@ -552,30 +380,26 @@ def run_one(args):
         m = algo.measure_history
         qd = m.qd_score[-1] if m.qd_score else 0.0
     except Exception as e:
+        print(f"ERROR: {algo_name}/{domain_name}/{persona_name}/seed{seed}: {e}", flush=True)
         qd = 0.0
 
     return (algo_name, domain_name, persona_name, seed, qd)
 
 
 def main():
-    n_seeds = 30
+    n_seeds = 100
     n_workers = min(cpu_count(), 60)
 
-    algorithms = [
-        "VC-MAP-Elites", "Filtering", "RandomRestarts", "Shuffling",
-        "EGGROLL", "Evict-Restart", "Bandit-UCB1", "Epsilon-Bandit",
-        "UH-nobandit", "AdaptRate-noreset", "BdEvict-nostag", "DE-Elites",
-        "Shuf+AdaptRate", "Shuf+Evict", "Shuf+Both",
-    ]
+    algorithms = ["UH-nobandit", "Shuf+Both", "Shuf+AdaptRate", "Shuffling"]
     domains = ["TTP", "LogicPuzzles"]
     personas = ["Exploratory", "Cycle", "Adaptive", "Strict"]
 
     total_tasks = len(algorithms) * len(domains) * len(personas) * n_seeds
-    print(f"Comprehensive Rerun (official params, all baselines, all personas)")
+    print(f"100-Seed Official Params Run")
     print(f"  Parameters: gens={N_GENS} pop={POP_SIZE} mem={MEMORY} interval={INTERVAL}")
-    print(f"  Algorithms: {len(algorithms)}")
-    print(f"  Domains: {len(domains)}")
-    print(f"  Personas: {len(personas)}")
+    print(f"  Algorithms: {algorithms}")
+    print(f"  Domains: {domains}")
+    print(f"  Personas: {personas}")
     print(f"  Seeds: {n_seeds}")
     print(f"  Total tasks: {total_tasks}")
     print(f"  Workers: {n_workers}")
@@ -602,7 +426,7 @@ def main():
                 all_data[key] = []
             all_data[key].append(qd)
             completed += 1
-            if completed % 100 == 0:
+            if completed % 200 == 0:
                 elapsed = time.time() - t0
                 rate = completed / elapsed
                 eta = (total_tasks - completed) / rate
@@ -612,67 +436,59 @@ def main():
     elapsed = time.time() - t0
     print(f"\nCompleted {total_tasks} tasks in {elapsed:.0f}s ({elapsed/60:.1f} min)")
 
-    outpath = os.path.join(SCRIPT_DIR, "results", "comprehensive.json")
+    outpath = os.path.join(SCRIPT_DIR, "results", "100seed_official.json")
     os.makedirs(os.path.dirname(outpath), exist_ok=True)
     with open(outpath, "w") as f:
         json.dump(all_data, f, indent=2)
     print(f"Saved to {outpath}")
 
     # === Print results ===
-    shuffling_total = sum(np.mean(all_data.get(f"{d}|Shuffling|{p}", [0]))
-                          for d in domains for p in personas)
+    shuf_total = sum(np.mean(all_data.get(f"{d}|Shuffling|{p}", [0]))
+                     for d in domains for p in personas)
 
-    print("\n" + "=" * 110)
-    print("GRAND TOTAL RANKING (vs Shuffling, the strongest baseline)")
-    print("=" * 110)
-    totals = []
+    print("\n" + "=" * 90)
+    print("GRAND TOTAL RANKING (vs Shuffling)")
+    print("=" * 90)
     for a in algorithms:
         total = sum(np.mean(all_data.get(f"{d}|{a}|{p}", [0]))
                     for d in domains for p in personas)
-        totals.append((total, a))
-    totals.sort(reverse=True)
-    for rank, (total, aname) in enumerate(totals, 1):
-        pct = ((total - shuffling_total) / abs(shuffling_total) * 100) if shuffling_total != 0 else 0
-        print(f"  {rank:<3} {aname:<22} {total:>12.1f}  (vs Shuffling: {pct:>+7.1f}%)")
+        pct = ((total - shuf_total) / abs(shuf_total) * 100) if shuf_total != 0 else 0
+        print(f"  {a:<22} {total:>12.1f}  (vs Shuffling: {pct:>+7.1f}%)")
 
     # Per-domain per-persona
     for dname in domains:
         print(f"\n  {dname}:")
         print(f"  {'Algorithm':<22} " + " ".join(f"{p:>14}" for p in personas) + f" {'Total':>14}")
         print(f"  {'-'*22} " + " ".join(f"{'-'*14}" for _ in personas) + f" {'-'*14}")
-        rows = []
         for a in algorithms:
             vals = [np.mean(all_data.get(f"{dname}|{a}|{p}", [0])) for p in personas]
-            rows.append((sum(vals), a, vals))
-        rows.sort(reverse=True)
-        for total, aname, vals in rows:
-            print(f"  {aname:<22} " +
+            print(f"  {a:<22} " +
                   " ".join(f"{v:>14.1f}" for v in vals) +
-                  f" {total:>14.1f}")
+                  f" {sum(vals):>14.1f}")
 
-    # Stats: top algorithms vs Shuffling
-    print("\n" + "=" * 110)
-    print("STATISTICAL TESTS vs Shuffling (Mann-Whitney U)")
-    print("=" * 110)
-    for dname in domains:
-        for aname in algorithms:
-            if aname == "Shuffling":
-                continue
+    # Stats
+    print("\n" + "=" * 90)
+    print("STATISTICAL TESTS vs Shuffling (Mann-Whitney U, 100 seeds)")
+    print("=" * 90)
+    for a in algorithms:
+        if a == "Shuffling":
+            continue
+        for dname in domains:
             for pname in personas:
-                a = np.array(all_data.get(f"{dname}|{aname}|{pname}", [0]))
-                b = np.array(all_data.get(f"{dname}|Shuffling|{pname}", [0]))
-                ma, mb = np.mean(a), np.mean(b)
+                a_vals = np.array(all_data.get(f"{dname}|{a}|{pname}", [0]))
+                b_vals = np.array(all_data.get(f"{dname}|Shuffling|{pname}", [0]))
+                ma, mb = np.mean(a_vals), np.mean(b_vals)
                 try:
-                    U, p = stats.mannwhitneyu(a, b, alternative="two-sided")
+                    U, p = stats.mannwhitneyu(a_vals, b_vals, alternative="two-sided")
                 except ValueError:
                     p = 1.0
-                if p < 0.05:
-                    sa, sb = np.std(a, ddof=1), np.std(b, ddof=1)
-                    pooled = np.sqrt((sa**2 + sb**2) / 2)
-                    d = (ma - mb) / pooled if pooled > 0 else 0
-                    sig = "***" if p < 0.001 else ("**" if p < 0.01 else "*")
-                    print(f"  {dname:14} {aname:<22} {pname:<12} {ma:>10.1f} vs {mb:>10.1f} "
-                          f"d={d:>+.3f} p={p:.4f} {sig}")
+                sa, sb = np.std(a_vals, ddof=1), np.std(b_vals, ddof=1)
+                pooled = np.sqrt((sa**2 + sb**2) / 2)
+                d_val = (ma - mb) / pooled if pooled > 0 else 0
+                sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
+                print(f"  {a:<18} {dname:<14} {pname:<12} "
+                      f"mean={ma:>8.0f} vs {mb:>8.0f} diff={ma-mb:>+8.0f} "
+                      f"d={d_val:>+.3f} p={p:.6f} {sig}")
 
 
 if __name__ == "__main__":
